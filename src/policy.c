@@ -23,6 +23,7 @@
 #include "poolarch.h"
 #include "linkedpkg.h"
 #include "cplxdeps.h"
+#include "conda.h"
 
 
 
@@ -956,6 +957,95 @@ prune_to_best_version(Pool *pool, Queue *plist)
  * sort list of packages (given through plist) by name and evr
  * return result through plist
  */
+
+// char* find_lower_upper_bound(const char* c)
+// {
+//     int len = strlen(c);
+//     char* lowerbegin = NULL;
+//     char* lowerend;
+//     char* upperbegin;
+//     char* upperend;
+//     int lower_flag, upper_flag;
+//     for (int i = 0; i < len; ++i)
+//     {
+//         printf("%c", c[i]);
+//         if (c[i] == '>')
+//         {
+//             lower_flag = REL_GT;
+
+//             if (len > i && c[i + 1] == '=')
+//             {
+//                 lower_flag |= REL_EQ;
+//                 i++;
+//             }
+//             lowerbegin = c + i;
+//             char* p = c + i;
+//             while (*p && *p != ',' && *p != '|' && *p != '&')
+//             {
+//                 p++;
+//             }
+//             lowerend = p;
+//         }
+//     }
+
+//     if (lowerbegin != NULL)
+//     {
+//       char buf[1000];
+//       strncpy(buf, lowerbegin, lowerend - lowerbegin);
+//       printf("Lower bound: %s", buf);
+//       return lowerbegin;
+//     }
+// }
+
+int
+conda_compare_dependencies(Pool *pool, Solvable *s1, Solvable *s2)
+{
+  Queue q1, q2;
+  queue_init(&q1); queue_init(&q2);
+  if (!s1 || !s2) return 0;
+  solvable_lookup_deparray(s1, SOLVABLE_REQUIRES, &q1, -1);
+  solvable_lookup_deparray(s2, SOLVABLE_REQUIRES, &q2, -1);
+  printf("\n\nSolvable dep compare: %s\n===================\n\n",pool_id2str(pool, s1->name));
+  for (int i = 0; i < q1.count; ++i)
+  {
+    Id x1 = q1.elements[i];
+    // while (ISRELDEP(x1)) {
+    Reldep *rd1 = GETRELDEP(pool, x1);
+    for (int j = 0; j < q2.count; j++)
+    {
+      Id x2 = q2.elements[j];
+      Reldep *rd2 = GETRELDEP(pool, x2);
+      if (rd2->name == rd1->name && rd2->evr != rd1->evr)
+      {
+        return conda_compare_bounds(pool_id2str(pool, rd1->evr), pool_id2str(pool, rd2->evr));
+        // return 0;
+        // compare the deps
+        // int rel = rd->flags;
+        printf("Name: %s\n", pool_id2str(pool, rd1->name));
+        printf("EVR : %s vs %s\n", pool_id2str(pool, rd1->evr), pool_id2str(pool, rd2->evr));
+        // printf("Rel : %d\n", rel);
+      }
+    }
+  }
+  printf("\n\n");
+  return 0;
+}
+
+static int
+sort_by_best_dependencies(const void *ap, const void *bp, void *dp)
+{
+  Pool* pool = (Pool*) dp;
+
+  Id a = *(Id *)ap;
+  Id b = *(Id *)bp;
+  Solvable *sa, *sb;
+
+  sa = pool->solvables + a;
+  sb = pool->solvables + b;
+
+  return conda_compare_dependencies(pool, sa, sb); 
+}
+
 void
 prune_to_best_version_conda(Pool *pool, Queue *plist)
 {
@@ -1023,12 +1113,69 @@ prune_to_best_version_conda(Pool *pool, Queue *plist)
         queue_push(&q, s - pool->solvables);
     }
 
+  for (int jj = 0; jj < q.count; ++jj)
+  {
+    s = pool->solvables + q.elements[jj];
+    printf("- %s\n", pool_solvable2str(pool, s));
+  }
+
+  if (plist->count > 1)
+  {
+    Queue sq;
+    queue_init(&sq);
+    // order by first-level deps
+    /* sort by name first, prefer installed */
+    printf("\n\n- -  -- - - - - -- \n\n");
+    solv_sort(q.elements, q.count, sizeof(Id), sort_by_best_dependencies, pool);
+
+    for (int jj = 0; jj < q.count; ++jj)
+    {
+      s = pool->solvables + q.elements[jj];
+      printf("- %s\n", pool_solvable2str(pool, s));
+    }
+    // for (i = j = 0; i < plist->count; i++)
+    // {
+    //   s = pool->solvables + plist->elements[i];
+    //   if ()
+
+    //   conda_compare_dependencies(pool, best, s);
+      // solvable_lookup_deparray(s, SOLVABLE_REQUIRES, &sq, -1);
+      // for (int si = 0; si < sq.count; ++si)
+      // {
+      //   Id six = sq.elements[si];
+      //   const char* rex = pool_dep2str(pool, six);
+      //   int rexi, spacecount=0;
+      //   for (rexi = 0; rexi < strlen(rex); rexi++)
+      //   {
+      //     if ((rex[rexi]) == ' ') spacecount += 1;
+      //   }
+
+        // if (spacecount == 2)
+        // {
+        //   printf("TF :: Requirement -> %s\n", pool_dep2str(pool, six));
+        //   const char* c = pool_dep2str(pool, six);
+        //   find_lower_upper_bound(c);
+        //   printf("%s", c);
+        // }
+        // else if (spacecount == 1)
+        // {
+        //   printf("Versioned -> %s\n", pool_dep2str(pool, six));
+        // }
+        // else
+        // {
+        //   // printf("Simreq -> %s\n", pool_dep2str(pool, six));
+        // }
+    //   }
+    // }
+    // queue_free(&sq);
+  }
+
   for (i = 0; i < q.count; ++i)
     {
       plist->elements[i] = q.elements[i];
     }
-
   plist->count = q.count;
+
   queue_free(&q);
 }
 #endif  // ENABLE_CONDA
