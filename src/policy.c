@@ -1005,29 +1005,33 @@ conda_compare_dependencies(Pool *pool, Solvable *s1, Solvable *s2)
   if (!s1 || !s2) return 0;
   solvable_lookup_deparray(s1, SOLVABLE_REQUIRES, &q1, -1);
   solvable_lookup_deparray(s2, SOLVABLE_REQUIRES, &q2, -1);
-  printf("\n\nSolvable dep compare: %s\n===================\n\n",pool_id2str(pool, s1->name));
+  printf("\n\nSolvable dep compare: %s\n===================\n\n", pool_id2str(pool, s1->name));
+  int comp_result = 0;
   for (int i = 0; i < q1.count; ++i)
   {
+    printf("I == %d\n", i);
     Id x1 = q1.elements[i];
-    // while (ISRELDEP(x1)) {
-    Reldep *rd1 = GETRELDEP(pool, x1);
-    for (int j = 0; j < q2.count; j++)
+
+    if (ISRELDEP(x1))
     {
-      Id x2 = q2.elements[j];
-      Reldep *rd2 = GETRELDEP(pool, x2);
-      if (rd2->name == rd1->name && rd2->evr != rd1->evr)
+      Reldep *rd1 = GETRELDEP(pool, x1);
+      for (int j = 0; j < q2.count; j++)
       {
-        return conda_compare_bounds(pool_id2str(pool, rd1->evr), pool_id2str(pool, rd2->evr));
-        // return 0;
-        // compare the deps
-        // int rel = rd->flags;
-        printf("Name: %s\n", pool_id2str(pool, rd1->name));
-        printf("EVR : %s vs %s\n", pool_id2str(pool, rd1->evr), pool_id2str(pool, rd2->evr));
-        // printf("Rel : %d\n", rel);
+        Id x2 = q2.elements[j];
+        if (ISRELDEP(x2))
+        {
+          Reldep *rd2 = GETRELDEP(pool, x2);
+          if (rd2->name == rd1->name && rd2->evr != rd1->evr)
+          {
+            comp_result += conda_compare_bounds(pool_id2str(pool, rd1->evr), pool_id2str(pool, rd2->evr));
+          }
+        }
       }
     }
   }
   printf("\n\n");
+  if (comp_result > 0) return 1;
+  if (comp_result < 0) return -1;
   return 0;
 }
 
@@ -1113,26 +1117,28 @@ prune_to_best_version_conda(Pool *pool, Queue *plist)
         queue_push(&q, s - pool->solvables);
     }
 
-  for (int jj = 0; jj < q.count; ++jj)
-  {
-    s = pool->solvables + q.elements[jj];
-    printf("- %s\n", pool_solvable2str(pool, s));
-  }
+  // for (int jj = 0; jj < q.count; ++jj)
+  // {
+  //   s = pool->solvables + q.elements[jj];
+  //   printf("- %s\n", pool_solvable2str(pool, s));
+  // }
 
-  if (plist->count > 1)
+
+  if (q.count > 1)
   {
     Queue sq;
     queue_init(&sq);
     // order by first-level deps
     /* sort by name first, prefer installed */
-    printf("\n\n- -  -- - - - - -- \n\n");
     solv_sort(q.elements, q.count, sizeof(Id), sort_by_best_dependencies, pool);
+    printf("\n\n------------------------------\n\n");
 
     for (int jj = 0; jj < q.count; ++jj)
     {
       s = pool->solvables + q.elements[jj];
       printf("- %s\n", pool_solvable2str(pool, s));
     }
+
     // for (i = j = 0; i < plist->count; i++)
     // {
     //   s = pool->solvables + plist->elements[i];

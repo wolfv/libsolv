@@ -2521,7 +2521,20 @@ void solver_run_sat(Solver *solv, int disablerules, int doweak) {
       // transaction_print(t);
       // transaction_free(t);
 			// solver_printdecisionq(solv, SOLV_DEBUG_RESULT);
-
+      for (int ii = 0; ii < solv->decisionq.count; ++ii)
+      {
+        Id p = solv->decisionq.elements[ii];
+        if (p > 0)
+        {
+          Solvable* s = pool->solvables + (p > 0 ? p : -p);
+          int cnt = solvable_lookup_count(s, SOLVABLE_TRACK_FEATURES);
+          if (cnt != 0)
+          {
+            printf("Have trackfeature: %s", pool_solvable2str(pool, s));
+          }
+        }
+        // printf("%d :: %s\n", p, pool_solvable2str(pool, s));
+      }
       p = l = 0;
       for (i = solv->branches.count - 1; i >= 0; i--) {
         p = solv->branches.elements[i];
