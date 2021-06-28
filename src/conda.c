@@ -18,6 +18,7 @@
 #include <string.h>
 #include <sys/types.h>
 #include <regex.h>
+#include <ctype.h>
 
 #include "pool.h"
 #include "repo.h"
@@ -224,6 +225,7 @@ pool_evrcmp_conda_int(const char *evr1, const char *evr1e, const char *evr2, con
 int
 pool_evrcmp_conda(const Pool *pool, const char *evr1, const char *evr2, int mode)
 {
+  // printf("EVR CMP conda: %s, %s", evr1, evr2);
   if (evr1 == evr2)
     return 0;
   return pool_evrcmp_conda_int(evr1, evr1 + strlen(evr1), evr2, evr2 + strlen(evr2), 0);
@@ -790,8 +792,78 @@ int find_lower_upper_bound(const char* c,
   if (upperbegin != NULL && upperbegin != upper)
     strncat(upper, upperbegin, upperend - upperbegin);
 
-  printf("\nLower: %s\nUpper: %s\nFlags: %d\n", lower, upper, *upperflag);
   return 1;
+}
+
+void normalize_bound(int* flags, char* bound)
+{
+  if ((*flags & (REL_GT | REL_EQ)) == (REL_GT | REL_EQ)) return;
+  if (*flags & REL_GT)
+  {
+    size_t len = strlen(bound);
+    if (len == 0) return;
+
+    char snum[100] = "\0";
+    char sbef[100] = "\0", saft[100] = "\0";
+
+    const char* end = &bound[len - 1];
+    const char* start;
+
+    for (;end >= bound; --end) {
+      if (*end == '.') {
+        end++;
+        break;
+      }
+    }
+
+    start = end;
+
+    while ((*end != '\0') && isdigit(*end))
+      ++end;
+
+    memcpy(sbef, bound, start - bound);
+    sbef[start - bound ] = '\0';
+    memcpy(saft, end, &bound[len] - end);
+    strncpy(snum, start, end - start);
+
+    size_t num;
+    if (1 == sscanf(snum, "%zu", &num))
+    {
+      sprintf(bound, "%s%zu%s", sbef, num + 1, saft);
+    }
+    else
+    {
+      return;
+    }
+  }
+}
+
+// given a list of bounds, selects the highest lowest 
+// for a given solvable, e.g.
+// - python =3.4
+// - python >=3.3
+// -- will return reldep for `python =3.4` etc.
+Reldep* select_best_bound(Pool* pool, Queue* q, Id name)
+{
+  Reldep* res = NULL;
+  for (int i = 0; i < q->count; ++i)
+  {
+    Id x1 = q->elements[i];
+    Reldep *rd1 = GETRELDEP(pool, x1);
+    if (rd1->name == name)
+    {
+      if (res)
+      {
+        // check if this has a higher lower bound than rd1
+        int cmp = conda_compare_bounds(pool_id2str(pool, res->evr),
+                                       pool_id2str(pool, rd1->evr));
+        if (cmp > 0) res = rd1;
+      }
+      else
+        res = rd1;
+    }
+  }
+  return res;
 }
 
 int conda_compare_bounds(const char* b1, const char* b2)
@@ -816,9 +888,12 @@ int conda_compare_bounds(const char* b1, const char* b2)
   // edge cases `=3.7, >=3.7 --> lower bound equal, upper bound different
   // edge cases `==3.7, =3.7 --> lower bound equal, upper bound different
 
+  // printf("compare: %s vs %s", l1, l2);
+
   // both lower pin with * at end
   if (lf1 == lf2)
   {
+    printf("compare: %s vs %s\n", l1, l2);
     int l_evr_cmp = pool_evrcmp_conda(NULL, l1, l2, 0);
     if (l_evr_cmp != 0)
     {
@@ -827,6 +902,9 @@ int conda_compare_bounds(const char* b1, const char* b2)
   }
   else
   {
+    normalize_bound(&lf1, l1);
+    normalize_bound(&lf2, l2);
+
     int l_evr_cmp = pool_evrcmp_conda(NULL, l1, l2, 0);
     // TODO
     // need some logic here to normalize the bounds 

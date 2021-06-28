@@ -967,45 +967,321 @@ pool_dephastrackfeatures(Pool* pool, Id dep)
   return 1;
 }
 
-int
-conda_compare_dependencies(Pool *pool, Solvable *s1, Solvable *s2)
+void intersect_selection(Pool* pool, Id dep, Queue* prev)
 {
-  Queue q1, q2;
-  queue_init(&q1);
-  queue_init(&q2);
-  if (!s1 || !s2) return 0;
-  solvable_lookup_deparray(s1, SOLVABLE_REQUIRES, &q1, -1);
-  solvable_lookup_deparray(s2, SOLVABLE_REQUIRES, &q2, -1);
+  Queue tmp, res;
+  queue_init(&tmp);
+  // could use queue init buffer as optimization
+  queue_init(&res);
 
-  int comp_result = 0;
-  for (int i = 0; i < q1.count; ++i)
+  Id* pp, p;
+  pp = pool_whatprovides_ptr(pool, dep);
+  while ((p = *pp++) != 0)
   {
-    Id x1 = q1.elements[i];
-    if (ISRELDEP(x1))
-    {
-      Reldep *rd1 = GETRELDEP(pool, x1);
-      for (int j = 0; j < q2.count; j++)
-      {
-        Id x2 = q2.elements[j];
-        if (ISRELDEP(x2))
+    queue_push(&tmp, p);
+  }
+
+  int i = 0, j = 0;
+  // set intersection, assuming sorted arrays
+  if (prev)
+  {
+    while (i < prev->count && j < tmp.count) {
+        if (prev->elements[i] < tmp.elements[j])
+            i++;
+        else if (tmp.elements[j] < prev->elements[i])
+            j++;
+        else /* if arr1[i] == arr2[j] */
         {
-          Reldep *rd2 = GETRELDEP(pool, x2);
-          if (rd2->name == rd1->name && rd2->evr != rd1->evr)
-          {
-            int tf_diff = pool_dephastrackfeatures(pool, x1) - pool_dephastrackfeatures(pool, x2);
-            if (tf_diff != 0) return tf_diff;
-            comp_result += conda_compare_bounds(pool_id2str(pool, rd1->evr), pool_id2str(pool, rd2->evr));
-          }
+          queue_push(&res, tmp.elements[j]);
+          i++;
+          j++;
         }
-      }
+    }
+  }
+  queue_free(&tmp);
+  queue_free(prev);
+  prev = &res;
+}
+
+int check_deps_unequal(Pool* pool, Queue* q1, Queue* q2, Id name)
+{
+  Id h1 = 0, h2 = 0;
+  int i;
+  Id elem;
+
+  // TODO check if reldep ID is equal if same reldep
+  Reldep* rdep;
+  for (i = 0; i < q1->count; ++i)
+  {
+    elem = q1->elements[i];
+    if (!ISRELDEP(elem)) continue;
+    rdep = GETRELDEP(pool, elem);
+
+    if (rdep->name == name)
+    {
+      h1 ^= rdep->evr;
     }
   }
 
-  if (comp_result > 0) return 1;
-  if (comp_result < 0) return -1;
+  for (i = 0; i < q2->count; ++i)
+  {
+    elem = q2->elements[i];
+    if (!ISRELDEP(elem)) continue;
+    rdep = GETRELDEP(pool, elem);
 
-  return 0;
+    if (rdep->name == name)
+    {
+      h2 ^= rdep->evr;
+    }
+  }
+  return h1 != h2;
 }
+
+Id best_matching(Pool* pool, Queue* q, Id name, int* all_have_trackfeatures)
+{
+  int first = 1;
+  Id p, *pp, lastid;
+
+  Queue selection;
+  queue_init(&selection);
+
+  Id elem;
+
+  for (int i = 0; i < q->count; ++i)
+  {
+    elem = q->elements[i];
+    if (!ISRELDEP(elem) || GETRELDEP(pool, elem)->name != name) continue;
+
+    if (first)
+    {
+      pp = pool_whatprovides_ptr(pool, elem);
+      printf("Got whtaprovides... %d", pp);
+      fflush(stdout);
+
+
+      while ((p = *pp++) != 0)
+      {
+        printf("Push... \n");
+        queue_push(&selection, p);
+      }
+      first = 0;
+    }
+    else
+    {
+      intersect_selection(pool, elem, &selection);
+    }
+  }
+
+  fflush(stdout);
+  if (selection.count == 0)
+  {
+    // no matches found ...
+    return 0;
+  }
+
+  Solvable* best = pool_id2solvable(pool, selection.elements[0]), *stmp;
+  int cmp;
+
+  *all_have_trackfeatures = 1;
+  for (int i = 0; i < selection.count; ++i)
+    if (solvable_lookup_count(pool_id2solvable(pool, selection.elements[i]),
+                              SOLVABLE_TRACK_FEATURES) == 0)
+      {
+        *all_have_trackfeatures = 0;
+        break;
+      }
+  
+  for (int i = 0; i < selection.count; ++i)
+  {
+    stmp = pool_id2solvable(pool, selection.elements[i]);
+    cmp = pool_evrcmp(pool, best->evr, stmp->evr, 0);
+    printf("Comparing: %s vs %s: %d\n", 
+      pool_id2str(pool, best->evr),
+      pool_id2str(pool, stmp->evr),
+      cmp);
+    if (cmp < 0) best = stmp;
+  }
+
+  return best->evr;
+}
+
+int conda_compare_dependencies(Pool *pool, Solvable *s1, Solvable *s2)
+{
+  int i, j, has_seen;
+  Queue pkgs_a, pkgs_b, q1, q2, seen;
+  Queue* selection_a, *selection_b;
+  Id p, *pp, lastid;
+
+  queue_init(&pkgs_a);
+  queue_init(&pkgs_b);
+  queue_init(&q1);
+  queue_init(&q2);
+  queue_init(&seen);
+
+  solvable_lookup_deparray(s1, SOLVABLE_REQUIRES, &q1, -1);
+  solvable_lookup_deparray(s2, SOLVABLE_REQUIRES, &q2, -1);
+
+  int comparison_result = 0;
+
+  for (i = 0; i < q1.count; ++i)
+  {
+    Id x1 = q1.elements[i];
+    has_seen = 0;
+
+    if (!ISRELDEP(x1))
+    {
+      continue;
+    }
+
+    Reldep* rd1 = GETRELDEP(pool, x1);
+    for (j = 0; j < seen.count && has_seen == 0; ++j)
+    {
+      if (seen.elements[i] == rd1->name)
+        has_seen = 1;
+    }
+    printf("Has seen: %d\n", has_seen);
+
+    if (has_seen)
+      {
+        continue;
+      }
+
+    // first make sure that deps are different between a & b
+    int deps_unequal = check_deps_unequal(pool, &q1, &q2, rd1->name);
+    printf("Deps are unequal: %d\n", deps_unequal);
+    fflush(stdout);
+    if (1)
+    {
+      int ii;
+      for (ii = 0; ii < q1.count; ++ii)
+      {
+        Id elem = q1.elements[ii];
+        if (ISRELDEP(elem) && GETRELDEP(pool, elem)->name == rd1->name)
+        {
+          printf("Reldep: %s\n", pool_dep2str(pool, elem));       
+        }
+      }
+      printf("\nQ2: \n");
+      for (int ii = 0; ii < q2.count; ++ii)
+      {
+        Id elem = q2.elements[ii];
+        if (ISRELDEP(elem) && GETRELDEP(pool, elem)->name == rd1->name)
+        {
+          printf("Reldep: %s\n", pool_dep2str(pool, elem));  
+        }
+      }
+    }
+
+    if (!deps_unequal)
+      {
+        printf("Deps equal, continue\n");
+        queue_push(&seen, rd1->name);
+        continue;
+      }
+
+      int aht_1, aht_2;
+      Id b1 = best_matching(pool, &q1, rd1->name, &aht_1);
+      Id b2 = best_matching(pool, &q2, rd1->name, &aht_2);
+
+      if (aht_1 != aht_2)
+      {
+        comparison_result += (aht_1 - aht_2) * 100;
+      }
+      // ??
+      // if (b1 == 0) return -1;
+      // if (b2 == 0) return 1;
+      comparison_result += pool_evrcmp(pool, b2, b1, 0);
+
+    // queue_empty(&selection_a);
+    // queue_push(&selection_a, x1);
+    // for (j = i + 1; j < q1.count; ++j)
+    // {
+    //   Id addselectors = q1.elements[j];
+    //   Reldep* tmp = GETRELDEP(pool, x1);
+    //   if (tmp->name == rd1->name)
+    //   {
+    //     queue_push(&selection_a, addselectors);
+    //   }
+    // }
+
+    // // selection_filter(SELECTION_FILTER
+    // FOR_JOB_SELECT(p, pp, SOLVER_SOLVABLE_PROVIDES, selection_a)
+    // {
+    //   printf("P: %s", pool_id2str(pool, p));
+    //   queue_push(pkgs, p);
+    // }
+  }
+  return comparison_result;
+}
+
+// int
+// conda_compare_dependencies(Pool *pool, Solvable *s1, Solvable *s2)
+// {
+// // selection_solvables(Pool *pool, Queue *selection, Queue *pkgs)
+// // {
+
+
+//   Queue q1, q2, seen;
+//   Reldep *rd1;
+//   Reldep *rd2;
+//   queue_init(&q1);
+//   queue_init(&q2);
+//   queue_init(&seen);
+//   if (!s1 || !s2) return 0;
+
+//   solvable_lookup_deparray(s1, SOLVABLE_REQUIRES, &q1, -1);
+//   solvable_lookup_deparray(s2, SOLVABLE_REQUIRES, &q2, -1);
+
+//   int comp_result = 0, have_seen;
+//   for (int i = 0; i < q1.count; ++i)
+//   {
+//     have_seen = 0;
+
+//     Id x1 = q1.elements[i];
+//     if (ISRELDEP(x1))
+//     {
+//       rd1 = GETRELDEP(pool, x1);
+//       for (int si = 0; si < seen.count; ++si)
+//         if (seen.elements[si] == rd1->name)
+//           have_seen = 1;
+
+//       if (have_seen)
+//         break;
+
+//       rd2 = select_best_bound(pool, &q1, rd1->name);
+//       if (!rd2)
+//       {
+//         // the other dep doesn't have this one
+//         // we could return -1 here as we should prefer
+//         // those solvables with _fewer_ dependencies
+//         break;
+//       }
+
+//       // select the best from possible multiple ones...
+//       rd1 = select_best_bound(pool, &q1, rd1->name);
+
+//       if (rd1->evr != rd2->evr)
+//       {
+//         queue_push(&seen, rd1->name);
+
+//         int tf_diff = pool_dephastrackfeatures(pool, x1) - pool_dephastrackfeatures(pool, x2);
+//         if (tf_diff != 0)
+//         {
+//           comp_result += (tf_diff * 1000);
+//         }
+//         else
+//         {
+//           comp_result += conda_compare_bounds(pool_id2str(pool, rd1->evr), pool_id2str(pool, rd2->evr));
+//         }
+//       }
+//     }
+//   }
+
+//   if (comp_result > 0) return 1;
+//   if (comp_result < 0) return -1;
+
+//   return 0;
+// }
 
 static int
 sort_by_best_dependencies(const void *ap, const void *bp, void *dp)
@@ -1019,7 +1295,11 @@ sort_by_best_dependencies(const void *ap, const void *bp, void *dp)
   sa = pool->solvables + a;
   sb = pool->solvables + b;
 
-  return conda_compare_dependencies(pool, sa, sb); 
+  int res = conda_compare_dependencies(pool, sa, sb);
+  printf("Solvable comparison: %s vs %s: %d", pool_solvable2str(pool, sa), 
+    pool_solvable2str(pool, sb),
+    res);
+  return res; 
 }
 
 /*
